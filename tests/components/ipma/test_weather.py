@@ -4,6 +4,14 @@ from unittest.mock import patch
 
 from homeassistant.components import weather
 from homeassistant.components.weather import (
+    ATTR_FORECAST,
+    ATTR_FORECAST_CONDITION,
+    ATTR_FORECAST_PRECIPITATION_PROBABILITY,
+    ATTR_FORECAST_TEMP,
+    ATTR_FORECAST_TEMP_LOW,
+    ATTR_FORECAST_TIME,
+    ATTR_FORECAST_WIND_BEARING,
+    ATTR_FORECAST_WIND_SPEED,
     ATTR_WEATHER_HUMIDITY,
     ATTR_WEATHER_PRESSURE,
     ATTR_WEATHER_TEMPERATURE,
@@ -12,10 +20,16 @@ from homeassistant.components.weather import (
     DOMAIN as WEATHER_DOMAIN,
 )
 from homeassistant.setup import async_setup_component
+from homeassistant.util.dt import now
 
-from tests.common import MockConfigEntry, mock_coro
+from tests.common import MockConfigEntry
 
-TEST_CONFIG = {"name": "HomeTown", "latitude": "40.00", "longitude": "-8.00"}
+TEST_CONFIG = {
+    "name": "HomeTown",
+    "latitude": "40.00",
+    "longitude": "-8.00",
+    "mode": "daily",
+}
 
 
 class MockLocation:
@@ -71,16 +85,16 @@ class MockLocation:
                 "2020-01-15T07:51:00",
                 9,
                 "S",
-                None,
+                "10",
             ),
             Forecast(
                 "7.7",
-                "2020-01-15T02:00:00",
+                now().utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
                 1,
                 "86.9",
                 None,
                 None,
-                "-99.0",
+                "80.0",
                 10.6,
                 "2020-01-15T07:51:00",
                 10,
@@ -119,12 +133,14 @@ async def test_setup_configuration(hass):
     """Test for successfully setting up the IPMA platform."""
     with patch(
         "homeassistant.components.ipma.weather.async_get_location",
-        return_value=mock_coro(MockLocation()),
+        return_value=MockLocation(),
     ):
         assert await async_setup_component(
-            hass, weather.DOMAIN, {"weather": {"name": "HomeTown", "platform": "ipma"}}
+            hass,
+            weather.DOMAIN,
+            {"weather": {"name": "HomeTown", "platform": "ipma", "mode": "hourly"}},
         )
-    await hass.async_block_till_done()
+        await hass.async_block_till_done()
 
     state = hass.states.get("weather.hometown")
     assert state.state == "rainy"
@@ -142,7 +158,7 @@ async def test_setup_config_flow(hass):
     """Test for successfully setting up the IPMA platform."""
     with patch(
         "homeassistant.components.ipma.weather.async_get_location",
-        return_value=mock_coro(MockLocation()),
+        return_value=MockLocation(),
     ):
         entry = MockConfigEntry(domain="ipma", data=TEST_CONFIG)
         await hass.config_entries.async_forward_entry_setup(entry, WEATHER_DOMAIN)
@@ -158,3 +174,53 @@ async def test_setup_config_flow(hass):
     assert data.get(ATTR_WEATHER_WIND_SPEED) == 3.94
     assert data.get(ATTR_WEATHER_WIND_BEARING) == "NW"
     assert state.attributes.get("friendly_name") == "HomeTown"
+
+
+async def test_daily_forecast(hass):
+    """Test for successfully getting daily forecast."""
+    with patch(
+        "homeassistant.components.ipma.weather.async_get_location",
+        return_value=MockLocation(),
+    ):
+        assert await async_setup_component(
+            hass,
+            weather.DOMAIN,
+            {"weather": {"name": "HomeTown", "platform": "ipma", "mode": "daily"}},
+        )
+        await hass.async_block_till_done()
+
+    state = hass.states.get("weather.hometown")
+    assert state.state == "rainy"
+
+    forecast = state.attributes.get(ATTR_FORECAST)[0]
+    assert forecast.get(ATTR_FORECAST_TIME) == "2020-01-15T00:00:00"
+    assert forecast.get(ATTR_FORECAST_CONDITION) == "rainy"
+    assert forecast.get(ATTR_FORECAST_TEMP) == 16.2
+    assert forecast.get(ATTR_FORECAST_TEMP_LOW) == 10.6
+    assert forecast.get(ATTR_FORECAST_PRECIPITATION_PROBABILITY) == "100.0"
+    assert forecast.get(ATTR_FORECAST_WIND_SPEED) == "10"
+    assert forecast.get(ATTR_FORECAST_WIND_BEARING) == "S"
+
+
+async def test_hourly_forecast(hass):
+    """Test for successfully getting daily forecast."""
+    with patch(
+        "homeassistant.components.ipma.weather.async_get_location",
+        return_value=MockLocation(),
+    ):
+        assert await async_setup_component(
+            hass,
+            weather.DOMAIN,
+            {"weather": {"name": "HomeTown", "platform": "ipma", "mode": "hourly"}},
+        )
+        await hass.async_block_till_done()
+
+    state = hass.states.get("weather.hometown")
+    assert state.state == "rainy"
+
+    forecast = state.attributes.get(ATTR_FORECAST)[0]
+    assert forecast.get(ATTR_FORECAST_CONDITION) == "rainy"
+    assert forecast.get(ATTR_FORECAST_TEMP) == 7.7
+    assert forecast.get(ATTR_FORECAST_PRECIPITATION_PROBABILITY) == 80.0
+    assert forecast.get(ATTR_FORECAST_WIND_SPEED) == "32.7"
+    assert forecast.get(ATTR_FORECAST_WIND_BEARING) == "S"

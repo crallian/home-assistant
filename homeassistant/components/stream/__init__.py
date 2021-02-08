@@ -2,6 +2,8 @@
 import logging
 import secrets
 import threading
+import time
+from types import MappingProxyType
 
 import voluptuous as vol
 
@@ -18,14 +20,16 @@ from .const import (
     CONF_LOOKBACK,
     CONF_STREAM_SOURCE,
     DOMAIN,
+    MAX_SEGMENTS,
+    OUTPUT_IDLE_TIMEOUT,
     SERVICE_RECORD,
+    STREAM_RESTART_INCREMENT,
+    STREAM_RESTART_RESET_TIME,
 )
-from .core import PROVIDERS
+from .core import PROVIDERS, IdleTimer
 from .hls import async_setup_hls
 
 _LOGGER = logging.getLogger(__name__)
-
-CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})}, extra=vol.ALLOW_EXTRA)
 
 STREAM_SERVICE_SCHEMA = vol.Schema({vol.Required(CONF_STREAM_SOURCE): cv.string})
 
@@ -36,8 +40,6 @@ SERVICE_RECORD_SCHEMA = STREAM_SERVICE_SCHEMA.extend(
         vol.Optional(CONF_LOOKBACK, default=0): int,
     }
 )
-# Set log level to error for libav
-logging.getLogger("libav").setLevel(logging.ERROR)
 
 
 @bind_hass
@@ -50,13 +52,12 @@ def request_stream(hass, stream_source, *, fmt="hls", keepalive=False, options=N
         options = {}
 
     # For RTSP streams, prefer TCP
-    if (
-        isinstance(stream_source, str)
-        and stream_source[:7] == "rtsp://"
-        and not options
-    ):
-        options["rtsp_flags"] = "prefer_tcp"
-        options["stimeout"] = "5000000"
+    if isinstance(stream_source, str) and stream_source[:7] == "rtsp://":
+        options = {
+            "rtsp_flags": "prefer_tcp",
+            "stimeout": "5000000",
+            **options,
+        }
 
     try:
         streams = hass.data[DOMAIN][ATTR_STREAMS]
@@ -75,12 +76,16 @@ def request_stream(hass, stream_source, *, fmt="hls", keepalive=False, options=N
             stream.access_token = secrets.token_hex()
             stream.start()
         return hass.data[DOMAIN][ATTR_ENDPOINTS][fmt].format(stream.access_token)
-    except Exception:
-        raise HomeAssistantError("Unable to get stream")
+    except Exception as err:
+        raise HomeAssistantError("Unable to get stream") from err
 
 
 async def async_setup(hass, config):
     """Set up stream."""
+    # Set log level to error for libav
+    logging.getLogger("libav").setLevel(logging.ERROR)
+    logging.getLogger("libav.mp4").setLevel(logging.ERROR)
+
     # Keep import here so that we can import stream integration without installing reqs
     # pylint: disable=import-outside-toplevel
     from .recorder import async_setup_recorder
@@ -102,7 +107,7 @@ async def async_setup(hass, config):
         for stream in hass.data[DOMAIN][ATTR_STREAMS].values():
             stream.keepalive = False
             stream.stop()
-        _LOGGER.info("Stopped stream workers.")
+        _LOGGER.info("Stopped stream workers")
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown)
 
@@ -136,21 +141,32 @@ class Stream:
 
     @property
     def outputs(self):
-        """Return stream outputs."""
-        return self._outputs
+        """Return a copy of the stream outputs."""
+        # A copy is returned so the caller can iterate through the outputs
+        # without concern about self._outputs being modified from another thread.
+        return MappingProxyType(self._outputs.copy())
 
-    def add_provider(self, fmt):
+    def add_provider(self, fmt, timeout=OUTPUT_IDLE_TIMEOUT):
         """Add provider output stream."""
         if not self._outputs.get(fmt):
-            provider = PROVIDERS[fmt](self)
+
+            @callback
+            def idle_callback():
+                if not self.keepalive and fmt in self._outputs:
+                    self.remove_provider(self._outputs[fmt])
+                self.check_idle()
+
+            provider = PROVIDERS[fmt](
+                self.hass, IdleTimer(self.hass, timeout, idle_callback)
+            )
             self._outputs[fmt] = provider
         return self._outputs[fmt]
 
     def remove_provider(self, provider):
         """Remove provider output stream."""
         if provider.name in self._outputs:
+            self._outputs[provider.name].cleanup()
             del self._outputs[provider.name]
-            self.check_idle()
 
         if not self._outputs:
             self.stop()
@@ -162,19 +178,55 @@ class Stream:
 
     def start(self):
         """Start a stream."""
+        if self._thread is None or not self._thread.is_alive():
+            if self._thread is not None:
+                # The thread must have crashed/exited. Join to clean up the
+                # previous thread.
+                self._thread.join(timeout=0)
+            self._thread_quit = threading.Event()
+            self._thread = threading.Thread(
+                name="stream_worker",
+                target=self._run_worker,
+            )
+            self._thread.start()
+            _LOGGER.info("Started stream: %s", self.source)
+
+    def _run_worker(self):
+        """Handle consuming streams and restart keepalive streams."""
         # Keep import here so that we can import stream integration without installing reqs
         # pylint: disable=import-outside-toplevel
         from .worker import stream_worker
 
-        if self._thread is None or not self._thread.isAlive():
-            self._thread_quit = threading.Event()
-            self._thread = threading.Thread(
-                name="stream_worker",
-                target=stream_worker,
-                args=(self.hass, self, self._thread_quit),
+        wait_timeout = 0
+        while not self._thread_quit.wait(timeout=wait_timeout):
+            start_time = time.time()
+            stream_worker(self.hass, self, self._thread_quit)
+            if not self.keepalive or self._thread_quit.is_set():
+                break
+
+            # To avoid excessive restarts, wait before restarting
+            # As the required recovery time may be different for different setups, start
+            # with trying a short wait_timeout and increase it on each reconnection attempt.
+            # Reset the wait_timeout after the worker has been up for several minutes
+            if time.time() - start_time > STREAM_RESTART_RESET_TIME:
+                wait_timeout = 0
+            wait_timeout += STREAM_RESTART_INCREMENT
+            _LOGGER.debug(
+                "Restarting stream worker in %d seconds: %s",
+                wait_timeout,
+                self.source,
             )
-            self._thread.start()
-            _LOGGER.info("Started stream: %s", self.source)
+        self._worker_finished()
+
+    def _worker_finished(self):
+        """Schedule cleanup of all outputs."""
+
+        @callback
+        def remove_outputs():
+            for provider in self.outputs.values():
+                self.remove_provider(provider)
+
+        self.hass.loop.call_soon_threadsafe(remove_outputs)
 
     def stop(self):
         """Remove outputs and access token."""
@@ -216,16 +268,15 @@ async def async_handle_record_service(hass, call):
     if recorder:
         raise HomeAssistantError(f"Stream already recording to {recorder.video_path}!")
 
-    recorder = stream.add_provider("recorder")
+    recorder = stream.add_provider("recorder", timeout=duration)
     recorder.video_path = video_path
-    recorder.timeout = duration
 
     stream.start()
 
     # Take advantage of lookback
     hls = stream.outputs.get("hls")
     if lookback > 0 and hls:
-        num_segments = min(int(lookback // hls.target_duration), hls.num_segments)
+        num_segments = min(int(lookback // hls.target_duration), MAX_SEGMENTS)
         # Wait for latest segment, then add the lookback
         await hls.recv()
         recorder.prepend(list(hls.get_segment())[-num_segments:])

@@ -31,12 +31,13 @@ CONFIG_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
-TAHOMA_COMPONENTS = ["scene", "sensor", "cover", "switch", "binary_sensor"]
+TAHOMA_COMPONENTS = ["binary_sensor", "cover", "lock", "scene", "sensor", "switch"]
 
 TAHOMA_TYPES = {
     "io:AwningValanceIOComponent": "cover",
     "io:ExteriorVenetianBlindIOComponent": "cover",
     "io:DiscreteGarageOpenerIOComponent": "cover",
+    "io:DiscreteGarageOpenerWithPartialPositionIOComponent": "cover",
     "io:HorizontalAwningIOComponent": "cover",
     "io:GarageOpenerIOComponent": "cover",
     "io:LightIOSystemSensor": "sensor",
@@ -52,6 +53,7 @@ TAHOMA_TYPES = {
     "io:VerticalExteriorAwningIOComponent": "cover",
     "io:VerticalInteriorBlindVeluxIOComponent": "cover",
     "io:WindowOpenerVeluxIOComponent": "cover",
+    "opendoors:OpenDoorsSmartLockComponent": "lock",
     "rtds:RTDSContactSensor": "sensor",
     "rtds:RTDSMotionSensor": "sensor",
     "rtds:RTDSSmokeSensor": "smoke",
@@ -60,9 +62,13 @@ TAHOMA_TYPES = {
     "rts:DualCurtainRTSComponent": "cover",
     "rts:ExteriorVenetianBlindRTSComponent": "cover",
     "rts:GarageDoor4TRTSComponent": "switch",
+    "rts:LightRTSComponent": "switch",
     "rts:RollerShutterRTSComponent": "cover",
     "rts:OnOffRTSComponent": "switch",
     "rts:VenetianBlindRTSComponent": "cover",
+    "somfythermostat:SomfyThermostatTemperatureSensor": "sensor",
+    "somfythermostat:SomfyThermostatHumiditySensor": "sensor",
+    "zwave:OnOffLightZWaveComponent": "switch",
 }
 
 

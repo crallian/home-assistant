@@ -4,6 +4,7 @@ import math
 
 from homeassistant import core as ha
 from homeassistant.components import (
+    camera,
     cover,
     fan,
     group,
@@ -16,6 +17,7 @@ from homeassistant.components import (
 from homeassistant.components.climate import const as climate
 from homeassistant.const import (
     ATTR_ENTITY_ID,
+    ATTR_ENTITY_PICTURE,
     ATTR_SUPPORTED_FEATURES,
     ATTR_TEMPERATURE,
     SERVICE_ALARM_ARM_AWAY,
@@ -41,6 +43,7 @@ from homeassistant.const import (
     TEMP_CELSIUS,
     TEMP_FAHRENHEIT,
 )
+from homeassistant.helpers import network
 import homeassistant.util.color as color_util
 from homeassistant.util.decorator import Registry
 import homeassistant.util.dt as dt_util
@@ -119,7 +122,15 @@ async def async_api_turn_on(hass, config, directive, context):
         domain = ha.DOMAIN
 
     service = SERVICE_TURN_ON
-    if domain == media_player.DOMAIN:
+    if domain == cover.DOMAIN:
+        service = cover.SERVICE_OPEN_COVER
+    elif domain == vacuum.DOMAIN:
+        supported = entity.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
+        if not supported & vacuum.SUPPORT_TURN_ON and supported & vacuum.SUPPORT_START:
+            service = vacuum.SERVICE_START
+    elif domain == timer.DOMAIN:
+        service = timer.SERVICE_START
+    elif domain == media_player.DOMAIN:
         supported = entity.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
         power_features = media_player.SUPPORT_TURN_ON | media_player.SUPPORT_TURN_OFF
         if not supported & power_features:
@@ -145,7 +156,18 @@ async def async_api_turn_off(hass, config, directive, context):
         domain = ha.DOMAIN
 
     service = SERVICE_TURN_OFF
-    if domain == media_player.DOMAIN:
+    if entity.domain == cover.DOMAIN:
+        service = cover.SERVICE_CLOSE_COVER
+    elif domain == vacuum.DOMAIN:
+        supported = entity.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
+        if (
+            not supported & vacuum.SUPPORT_TURN_OFF
+            and supported & vacuum.SUPPORT_RETURN_HOME
+        ):
+            service = vacuum.SERVICE_RETURN_TO_BASE
+    elif domain == timer.DOMAIN:
+        service = timer.SERVICE_CANCEL
+    elif domain == media_player.DOMAIN:
         supported = entity.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
         power_features = media_player.SUPPORT_TURN_ON | media_player.SUPPORT_TURN_OFF
         if not supported & power_features:
@@ -334,7 +356,6 @@ async def async_api_deactivate(hass, config, directive, context):
 async def async_api_set_percentage(hass, config, directive, context):
     """Process a set percentage request."""
     entity = directive.entity
-    percentage = int(directive.payload["percentage"])
     service = None
     data = {ATTR_ENTITY_ID: entity.entity_id}
 
@@ -342,6 +363,7 @@ async def async_api_set_percentage(hass, config, directive, context):
         service = fan.SERVICE_SET_SPEED
         speed = "off"
 
+        percentage = int(directive.payload["percentage"])
         if percentage <= 33:
             speed = "low"
         elif percentage <= 66:
@@ -466,7 +488,7 @@ async def async_api_select_input(hass, config, directive, context):
         )
         media_input = media_input.lower().replace(" ", "")
         if (
-            formatted_source in Inputs.VALID_SOURCE_NAME_MAP.keys()
+            formatted_source in Inputs.VALID_SOURCE_NAME_MAP
             and formatted_source == media_input
         ) or (
             media_input.endswith("1") and formatted_source == media_input.rstrip("1")
@@ -474,8 +496,8 @@ async def async_api_select_input(hass, config, directive, context):
             media_input = source
             break
     else:
-        msg = "failed to map input {} to a media source on {}".format(
-            media_input, entity.entity_id
+        msg = (
+            f"failed to map input {media_input} to a media source on {entity.entity_id}"
         )
         raise AlexaInvalidValueError(msg)
 
@@ -547,7 +569,7 @@ async def async_api_adjust_volume_step(hass, config, directive, context):
 
     data = {ATTR_ENTITY_ID: entity.entity_id}
 
-    for _ in range(0, abs(volume_int)):
+    for _ in range(abs(volume_int)):
         await hass.services.async_call(
             entity.domain, service_volume, data, blocking=False, context=context
         )
@@ -828,7 +850,6 @@ async def async_api_reportstate(hass, config, directive, context):
 async def async_api_set_power_level(hass, config, directive, context):
     """Process a SetPowerLevel request."""
     entity = directive.entity
-    percentage = int(directive.payload["powerLevel"])
     service = None
     data = {ATTR_ENTITY_ID: entity.entity_id}
 
@@ -836,6 +857,7 @@ async def async_api_set_power_level(hass, config, directive, context):
         service = fan.SERVICE_SET_SPEED
         speed = "off"
 
+        percentage = int(directive.payload["powerLevel"])
         if percentage <= 33:
             speed = "low"
         elif percentage <= 66:
@@ -899,10 +921,10 @@ async def async_api_arm(hass, config, directive, context):
 
     if arm_state == "ARMED_AWAY":
         service = SERVICE_ALARM_ARM_AWAY
-    if arm_state == "ARMED_STAY":
-        service = SERVICE_ALARM_ARM_HOME
-    if arm_state == "ARMED_NIGHT":
+    elif arm_state == "ARMED_NIGHT":
         service = SERVICE_ALARM_ARM_NIGHT
+    elif arm_state == "ARMED_STAY":
+        service = SERVICE_ALARM_ARM_HOME
 
     await hass.services.async_call(
         entity.domain, service, data, blocking=False, context=context
@@ -973,14 +995,14 @@ async def async_api_set_mode(hass, config, directive, context):
 
     # Fan Direction
     if instance == f"{fan.DOMAIN}.{fan.ATTR_DIRECTION}":
-        _, direction = mode.split(".")
+        direction = mode.split(".")[1]
         if direction in (fan.DIRECTION_REVERSE, fan.DIRECTION_FORWARD):
             service = fan.SERVICE_SET_DIRECTION
             data[fan.ATTR_DIRECTION] = direction
 
     # Cover Position
     elif instance == f"{cover.DOMAIN}.{cover.ATTR_POSITION}":
-        _, position = mode.split(".")
+        position = mode.split(".")[1]
 
         if position == cover.STATE_CLOSED:
             service = cover.SERVICE_CLOSE_COVER
@@ -1191,6 +1213,7 @@ async def async_api_adjust_range(hass, config, directive, context):
     service = None
     data = {ATTR_ENTITY_ID: entity.entity_id}
     range_delta = directive.payload["rangeValueDelta"]
+    range_delta_default = bool(directive.payload["rangeValueDeltaDefault"])
     response_value = 0
 
     # Fan Speed
@@ -1216,9 +1239,12 @@ async def async_api_adjust_range(hass, config, directive, context):
 
     # Cover Position
     elif instance == f"{cover.DOMAIN}.{cover.ATTR_POSITION}":
-        range_delta = int(range_delta)
+        range_delta = int(range_delta * 20) if range_delta_default else int(range_delta)
         service = SERVICE_SET_COVER_POSITION
         current = entity.attributes.get(cover.ATTR_POSITION)
+        if not current:
+            msg = f"Unable to determine {entity.entity_id} current position"
+            raise AlexaInvalidValueError(msg)
         position = response_value = min(100, max(0, range_delta + current))
         if position == 100:
             service = cover.SERVICE_OPEN_COVER
@@ -1229,9 +1255,12 @@ async def async_api_adjust_range(hass, config, directive, context):
 
     # Cover Tilt
     elif instance == f"{cover.DOMAIN}.tilt":
-        range_delta = int(range_delta)
+        range_delta = int(range_delta * 20) if range_delta_default else int(range_delta)
         service = SERVICE_SET_COVER_TILT_POSITION
         current = entity.attributes.get(cover.ATTR_TILT_POSITION)
+        if not current:
+            msg = f"Unable to determine {entity.entity_id} current tilt position"
+            raise AlexaInvalidValueError(msg)
         tilt_position = response_value = min(100, max(0, range_delta + current))
         if tilt_position == 100:
             service = cover.SERVICE_OPEN_COVER_TILT
@@ -1355,7 +1384,7 @@ async def async_api_skipchannel(hass, config, directive, context):
     else:
         service_media = SERVICE_MEDIA_NEXT_TRACK
 
-    for _ in range(0, abs(channel)):
+    for _ in range(abs(channel)):
         await hass.services.async_call(
             entity.domain, service_media, data, blocking=False, context=context
         )
@@ -1426,9 +1455,7 @@ async def async_api_set_eq_mode(hass, config, directive, context):
     if sound_mode_list and mode.lower() in sound_mode_list:
         data[media_player.const.ATTR_SOUND_MODE] = mode.lower()
     else:
-        msg = "failed to map sound mode {} to a mode on {}".format(
-            mode, entity.entity_id
-        )
+        msg = f"failed to map sound mode {mode} to a mode on {entity.entity_id}"
         raise AlexaInvalidValueError(msg)
 
     await hass.services.async_call(
@@ -1499,3 +1526,41 @@ async def async_api_resume(hass, config, directive, context):
     )
 
     return directive.response()
+
+
+@HANDLERS.register(("Alexa.CameraStreamController", "InitializeCameraStreams"))
+async def async_api_initialize_camera_stream(hass, config, directive, context):
+    """Process a InitializeCameraStreams request."""
+    entity = directive.entity
+    stream_source = await camera.async_request_stream(hass, entity.entity_id, fmt="hls")
+    camera_image = hass.states.get(entity.entity_id).attributes[ATTR_ENTITY_PICTURE]
+
+    try:
+        external_url = network.get_url(
+            hass,
+            allow_internal=False,
+            allow_ip=False,
+            require_ssl=True,
+            require_standard_port=True,
+        )
+    except network.NoURLAvailableError as err:
+        raise AlexaInvalidValueError(
+            "Failed to find suitable URL to serve to Alexa"
+        ) from err
+
+    payload = {
+        "cameraStreams": [
+            {
+                "uri": f"{external_url}{stream_source}",
+                "protocol": "HLS",
+                "resolution": {"width": 1280, "height": 720},
+                "authorizationType": "NONE",
+                "videoCodec": "H264",
+                "audioCodec": "AAC",
+            }
+        ],
+        "imageUri": f"{external_url}{camera_image}",
+    }
+    return directive.response(
+        name="Response", namespace="Alexa.CameraStreamController", payload=payload
+    )

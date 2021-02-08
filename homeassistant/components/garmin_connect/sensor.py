@@ -13,6 +13,7 @@ from homeassistant.const import ATTR_ATTRIBUTION, CONF_ID
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.typing import HomeAssistantType
 
+from .alarm_util import calculate_next_active_alarms
 from .const import ATTRIBUTION, DOMAIN, GARMIN_ENTITY_LIST
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,9 +33,9 @@ async def async_setup_entry(
         GarminConnectAuthenticationError,
         GarminConnectTooManyRequestsError,
     ) as err:
-        _LOGGER.error("Error occured during Garmin Connect Client update: %s", err)
+        _LOGGER.error("Error occurred during Garmin Connect Client update: %s", err)
     except Exception:  # pylint: disable=broad-except
-        _LOGGER.error("Unknown error occured during Garmin Connect Client update.")
+        _LOGGER.exception("Unknown error occurred during Garmin Connect Client update")
 
     entities = []
     for (
@@ -121,13 +122,17 @@ class GarminConnectSensor(Entity):
     @property
     def device_state_attributes(self):
         """Return attributes for sensor."""
-        attributes = {}
-        if self._data.data:
-            attributes = {
-                "source": self._data.data["source"],
-                "last_synced": self._data.data["lastSyncTimestampGMT"],
-                ATTR_ATTRIBUTION: ATTRIBUTION,
-            }
+        if not self._data.data:
+            return {}
+        attributes = {
+            "source": self._data.data["source"],
+            "last_synced": self._data.data["lastSyncTimestampGMT"],
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+        }
+        if self._type == "nextAlarm":
+            attributes["next_alarms"] = calculate_next_active_alarms(
+                self._data.data[self._type]
+            )
         return attributes
 
     @property
@@ -160,15 +165,30 @@ class GarminConnectSensor(Entity):
             return
 
         await self._data.async_update()
-        if not self._data.data:
+        data = self._data.data
+        if not data:
             _LOGGER.error("Didn't receive data from Garmin Connect")
             return
+        if data.get(self._type) is None:
+            _LOGGER.debug("Entity type %s not set in fetched data", self._type)
+            self._available = False
+            return
+        self._available = True
 
-        data = self._data.data
-        if "Duration" in self._type:
+        if "Duration" in self._type or "Seconds" in self._type:
             self._state = data[self._type] // 60
-        elif "Seconds" in self._type:
-            self._state = data[self._type] // 60
+        elif "Mass" in self._type or self._type == "weight":
+            self._state = round((data[self._type] / 1000), 2)
+        elif (
+            self._type == "bodyFat" or self._type == "bodyWater" or self._type == "bmi"
+        ):
+            self._state = round(data[self._type], 2)
+        elif self._type == "nextAlarm":
+            active_alarms = calculate_next_active_alarms(data[self._type])
+            if active_alarms:
+                self._state = active_alarms[0]
+            else:
+                self._available = False
         else:
             self._state = data[self._type]
 

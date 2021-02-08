@@ -3,7 +3,7 @@
 import logging
 from typing import Optional, Tuple
 
-from homeassistant.components.climate import ClimateDevice
+from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
@@ -149,7 +149,7 @@ def get_device(hass, values, **kwargs):
     return None
 
 
-class ZWaveClimateBase(ZWaveDeviceEntity, ClimateDevice):
+class ZWaveClimateBase(ZWaveDeviceEntity, ClimateEntity):
     """Representation of a Z-Wave Climate device."""
 
     def __init__(self, values, temp_unit):
@@ -529,7 +529,7 @@ class ZWaveClimateBase(ZWaveDeviceEntity, ClimateDevice):
         self._mode().data = operation_mode
 
     def turn_aux_heat_on(self):
-        """Turn auxillary heater on."""
+        """Turn auxiliary heater on."""
         if not self._aux_heat:
             return
         operation_mode = AUX_HEAT_ZWAVE_MODE
@@ -537,7 +537,7 @@ class ZWaveClimateBase(ZWaveDeviceEntity, ClimateDevice):
         self._mode().data = operation_mode
 
     def turn_aux_heat_off(self):
-        """Turn auxillary heater off."""
+        """Turn auxiliary heater off."""
         if not self._aux_heat:
             return
         if HVAC_MODE_HEAT in self._hvac_mapping:

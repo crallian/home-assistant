@@ -1,13 +1,12 @@
 """Support for the definition of zones."""
 import logging
-from typing import Dict, List, Optional, cast
+from typing import Any, Dict, Optional, cast
 
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import (
     ATTR_EDITABLE,
-    ATTR_HIDDEN,
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
     CONF_ICON,
@@ -18,6 +17,7 @@ from homeassistant.const import (
     CONF_RADIUS,
     EVENT_CORE_CONFIG_UPDATE,
     SERVICE_RELOAD,
+    STATE_UNAVAILABLE,
 )
 from homeassistant.core import Event, HomeAssistant, ServiceCall, State, callback
 from homeassistant.helpers import (
@@ -25,7 +25,6 @@ from homeassistant.helpers import (
     config_validation as cv,
     entity,
     entity_component,
-    entity_registry,
     service,
     storage,
 )
@@ -65,8 +64,21 @@ UPDATE_FIELDS = {
 }
 
 
+def empty_value(value: Any) -> Any:
+    """Test if the user has the default config value from adding "zone:"."""
+    if isinstance(value, dict) and len(value) == 0:
+        return []
+
+    raise vol.Invalid("Not a default value")
+
+
 CONFIG_SCHEMA = vol.Schema(
-    {vol.Optional(DOMAIN): vol.All(cv.ensure_list, [vol.Schema(CREATE_FIELDS)])},
+    {
+        vol.Optional(DOMAIN, default=[]): vol.Any(
+            vol.All(cv.ensure_list, [vol.Schema(CREATE_FIELDS)]),
+            empty_value,
+        )
+    },
     extra=vol.ALLOW_EXTRA,
 )
 
@@ -93,7 +105,7 @@ def async_active_zone(
     closest = None
 
     for zone in zones:
-        if zone.attributes.get(ATTR_PASSIVE):
+        if zone.state == STATE_UNAVAILABLE or zone.attributes.get(ATTR_PASSIVE):
             continue
 
         zone_dist = distance(
@@ -126,6 +138,9 @@ def in_zone(zone: State, latitude: float, longitude: float, radius: float = 0) -
 
     Async friendly.
     """
+    if zone.state == STATE_UNAVAILABLE:
+        return False
+
     zone_dist = distance(
         latitude,
         longitude,
@@ -159,48 +174,28 @@ class ZoneStorageCollection(collection.StorageCollection):
         return {**data, **update_data}
 
 
-class IDLessCollection(collection.ObservableCollection):
-    """A collection without IDs."""
-
-    counter = 0
-
-    async def async_load(self, data: List[dict]) -> None:
-        """Load the collection. Overrides existing data."""
-        for item_id in list(self.data):
-            await self.notify_change(collection.CHANGE_REMOVED, item_id, None)
-
-        self.data.clear()
-
-        for item in data:
-            self.counter += 1
-            item_id = f"fakeid-{self.counter}"
-
-            self.data[item_id] = item
-            await self.notify_change(collection.CHANGE_ADDED, item_id, item)
-
-
 async def async_setup(hass: HomeAssistant, config: Dict) -> bool:
     """Set up configured zones as well as Home Assistant zone if necessary."""
     component = entity_component.EntityComponent(_LOGGER, DOMAIN, hass)
     id_manager = collection.IDManager()
 
-    yaml_collection = IDLessCollection(
+    yaml_collection = collection.IDLessCollection(
         logging.getLogger(f"{__name__}.yaml_collection"), id_manager
     )
-    collection.attach_entity_component_collection(
-        component, yaml_collection, lambda conf: Zone(conf, False)
+    collection.sync_entity_lifecycle(
+        hass, DOMAIN, DOMAIN, component, yaml_collection, Zone.from_yaml
     )
 
     storage_collection = ZoneStorageCollection(
         storage.Store(hass, STORAGE_VERSION, STORAGE_KEY),
-        logging.getLogger(f"{__name__}_storage_collection"),
+        logging.getLogger(f"{__name__}.storage_collection"),
         id_manager,
     )
-    collection.attach_entity_component_collection(
-        component, storage_collection, lambda conf: Zone(conf, True)
+    collection.sync_entity_lifecycle(
+        hass, DOMAIN, DOMAIN, component, storage_collection, Zone
     )
 
-    if DOMAIN in config:
+    if config[DOMAIN]:
         await yaml_collection.async_load(config[DOMAIN])
 
     await storage_collection.async_load()
@@ -208,20 +203,6 @@ async def async_setup(hass: HomeAssistant, config: Dict) -> bool:
     collection.StorageCollectionWebsocket(
         storage_collection, DOMAIN, DOMAIN, CREATE_FIELDS, UPDATE_FIELDS
     ).async_setup(hass)
-
-    async def _collection_changed(
-        change_type: str, item_id: str, config: Optional[Dict]
-    ) -> None:
-        """Handle a collection change: clean up entity registry on removals."""
-        if change_type != collection.CHANGE_REMOVED:
-            return
-
-        ent_reg = await entity_registry.async_get_registry(hass)
-        ent_reg.async_remove(
-            cast(str, ent_reg.async_get_entity_id(DOMAIN, DOMAIN, item_id))
-        )
-
-    storage_collection.async_add_listener(_collection_changed)
 
     async def reload_service_handler(service_call: ServiceCall) -> None:
         """Remove all zones and load new ones from config."""
@@ -241,9 +222,9 @@ async def async_setup(hass: HomeAssistant, config: Dict) -> bool:
     if component.get_entity("zone.home"):
         return True
 
-    home_zone = Zone(_home_conf(hass), True,)
+    home_zone = Zone(_home_conf(hass))
     home_zone.entity_id = ENTITY_ID_HOME
-    await component.async_add_entities([home_zone])  # type: ignore
+    await component.async_add_entities([home_zone])
 
     async def core_config_updated(_: Event) -> None:
         """Handle core config updated."""
@@ -296,12 +277,20 @@ async def async_unload_entry(
 class Zone(entity.Entity):
     """Representation of a Zone."""
 
-    def __init__(self, config: Dict, editable: bool):
+    def __init__(self, config: Dict):
         """Initialize the zone."""
         self._config = config
-        self._editable = editable
+        self.editable = True
         self._attrs: Optional[Dict] = None
         self._generate_attrs()
+
+    @classmethod
+    def from_yaml(cls, config: Dict) -> "Zone":
+        """Return entity instance initialized from yaml storage."""
+        zone = cls(config)
+        zone.editable = False
+        zone._generate_attrs()  # pylint:disable=protected-access
+        return zone
 
     @property
     def state(self) -> str:
@@ -328,8 +317,15 @@ class Zone(entity.Entity):
         """Return the state attributes of the zone."""
         return self._attrs
 
+    @property
+    def should_poll(self) -> bool:
+        """Zone does not poll."""
+        return False
+
     async def async_update_config(self, config: Dict) -> None:
         """Handle when the config is updated."""
+        if self._config == config:
+            return
         self._config = config
         self._generate_attrs()
         self.async_write_ha_state()
@@ -338,10 +334,9 @@ class Zone(entity.Entity):
     def _generate_attrs(self) -> None:
         """Generate new attrs based on config."""
         self._attrs = {
-            ATTR_HIDDEN: True,
             ATTR_LATITUDE: self._config[CONF_LATITUDE],
             ATTR_LONGITUDE: self._config[CONF_LONGITUDE],
             ATTR_RADIUS: self._config[CONF_RADIUS],
             ATTR_PASSIVE: self._config[CONF_PASSIVE],
-            ATTR_EDITABLE: self._editable,
+            ATTR_EDITABLE: self.editable,
         }
