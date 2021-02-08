@@ -1,5 +1,7 @@
 """Support for Vanderbilt (formerly Siemens) SPC alarm systems."""
-from pyspcwebgw.const import AreaMode
+
+### CV added .. to pyspcwebgw import ###
+from ..pyspcwebgw.const import AreaMode
 
 import homeassistant.components.alarm_control_panel as alarm
 from homeassistant.components.alarm_control_panel.const import (

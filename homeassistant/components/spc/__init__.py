@@ -1,9 +1,10 @@
 """Support for Vanderbilt (formerly Siemens) SPC alarm systems."""
 import logging
 
-from pyspcwebgw import SpcWebGateway
-from pyspcwebgw.area import Area
-from pyspcwebgw.zone import Zone
+### CV added .. to pyspcwebgw imports ###
+from ..pyspcwebgw import SpcWebGateway
+from ..pyspcwebgw.area import Area
+from ..pyspcwebgw.zone import Zone
 import voluptuous as vol
 
 from homeassistant.helpers import aiohttp_client, discovery
