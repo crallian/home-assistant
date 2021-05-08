@@ -356,7 +356,12 @@ class BayesianBinarySensor(BinarySensorEntity):
         """Return True if state conditions are met."""
         entity = entity_observation["entity_id"]
 
-        return condition.state(self.hass, entity, entity_observation.get("to_state"))
+        try:
+            return condition.state(
+                self.hass, entity, entity_observation.get("to_state")
+            )
+        except ConditionError:
+            return False
 
     @property
     def name(self):
@@ -379,7 +384,7 @@ class BayesianBinarySensor(BinarySensorEntity):
         return self._device_class
 
     @property
-    def device_state_attributes(self):
+    def extra_state_attributes(self):
         """Return the state attributes of the sensor."""
 
         attr_observations_list = [

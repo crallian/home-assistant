@@ -32,6 +32,7 @@ class WorkerSync:
 
     def resume(self):
         """Allow the worker thread to finalize the stream."""
+        logging.debug("waking blocked worker")
         self._event.set()
 
     def blocking_finish(self, stream: Stream):
@@ -40,7 +41,8 @@ class WorkerSync:
         # Block the worker thread until the test has a chance to verify
         # the segments under test.
         logging.debug("blocking worker")
-        self._event.wait()
+        if self._event:
+            self._event.wait()
 
         # Forward to actual implementation
         self._original(stream)
